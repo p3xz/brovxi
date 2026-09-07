@@ -39,15 +39,18 @@ jobs:
       - name: Prebuild iOS project with Expo
         run: npx expo prebuild --platform ios --clean --no-install
 
-      - name: Bundle JavaScript with Metro
+      - name: Bundle JavaScript with Expo
         run: |
-          mkdir -p ios/main.jsbundle.d
-          npx react-native bundle \
+          npx expo export \
             --platform ios \
-            --dev false \
-            --entry-file node_modules/expo-router/entry.js \
-            --bundle-output ios/main.jsbundle \
-            --assets-dest ios/assets
+            --output-dir dist
+          # Copy the bundle where Xcode expects it
+          BUNDLE_FILE=$(find dist -name "*.js" | head -1)
+          echo "Found bundle: $BUNDLE_FILE"
+          cp "$BUNDLE_FILE" ios/main.jsbundle
+          # Copy assets
+          cp -r dist/assets ios/assets 2>/dev/null || true
+          echo "Bundle size: $(du -sh ios/main.jsbundle)"
 
       - name: Pod Install
         run: |
@@ -68,9 +71,9 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             PROVISIONING_PROFILE="" \
             COMPILER_INDEX_STORE_ENABLE=NO \
-            SKIP_BUNDLING=NO \
-            FORCE_BUNDLING=YES \
-            build 2>&1 | tail -80
+            SKIP_BUNDLING=YES \
+            BUNDLE_FILE="$(pwd)/main.jsbundle" \
+            build 2>&1 | tail -100
 
       - name: Find built .app
         run: find ios/build -name "*.app" -type d
@@ -79,14 +82,18 @@ jobs:
         run: |
           APP_PATH=$(find ios/build -name "*.app" -type d | head -1)
           echo "Found app at: $APP_PATH"
-          echo "App size:"
-          du -sh "$APP_PATH"
+          echo "App size: $(du -sh "$APP_PATH")"
+          # Copy in the JS bundle manually if not already there
+          mkdir -p "$APP_PATH"
+          cp ios/main.jsbundle "$APP_PATH/main.jsbundle" 2>/dev/null || true
+          # Copy assets
+          cp -r ios/assets "$APP_PATH/assets" 2>/dev/null || true
+          # Package
           mkdir -p build_output/Payload
           cp -r "$APP_PATH" build_output/Payload/brovxi.app
           cd build_output
           zip -r brovxi.ipa Payload
-          echo "IPA size:"
-          du -sh brovxi.ipa
+          echo "IPA size: $(du -sh brovxi.ipa)"
 
       - name: Upload IPA Artifact
         uses: actions/upload-artifact@v4
