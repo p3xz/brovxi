@@ -6,98 +6,109 @@ on:
 jobs:
   build-ipa:
     runs-on: macos-15
+
     steps:
+      # ── 1. Source ─────────────────────────────────────────────────────────
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: List available Xcode versions
-        run: ls /Applications/ | grep Xcode
-
-      - name: Select Xcode 16.2+
+      # ── 2. Xcode ──────────────────────────────────────────────────────────
+      # RN 0.81.5 requires Xcode >= 16.1. macos-15 ships 16.0 as default;
+      # 16.2 is also installed — select it explicitly.
+      - name: Select Xcode 16.2 (required by RN 0.81.5)
         run: |
-          if [ -d "/Applications/Xcode_16.2.app" ]; then
+          echo "Available Xcode installations:"
+          ls /Applications/ | grep Xcode
+
+          if   [ -d "/Applications/Xcode_16.2.app" ]; then
             sudo xcode-select -s /Applications/Xcode_16.2.app/Contents/Developer
           elif [ -d "/Applications/Xcode_16.1.app" ]; then
             sudo xcode-select -s /Applications/Xcode_16.1.app/Contents/Developer
           else
             XCODE=$(ls /Applications/ | grep "^Xcode_16\." | sort -V | tail -1)
-            sudo xcode-select -s /Applications/$XCODE/Contents/Developer
+            echo "Falling back to: $XCODE"
+            sudo xcode-select -s "/Applications/$XCODE/Contents/Developer"
           fi
 
-      - name: Verify Xcode version
-        run: xcodebuild -version
+          xcodebuild -version
 
-      - name: Setup Node.js
+      # ── 3. Node / npm ─────────────────────────────────────────────────────
+      - name: Setup Node.js 20
         uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: 'npm'
 
-      - name: Install dependencies
+      - name: Install npm dependencies
         run: npm install
 
-      - name: Prebuild iOS project with Expo
+      # ── 4. Expo prebuild ──────────────────────────────────────────────────
+      # Generates the native ios/ folder from app.json + plugins.
+      # --no-install: we already ran npm install above.
+      - name: Expo prebuild (iOS)
         run: npx expo prebuild --platform ios --clean --no-install
 
-      - name: Bundle JavaScript with Expo
-        run: |
-          npx expo export \
-            --platform ios \
-            --output-dir dist
-          # Find the iOS bundle - Expo with Hermes outputs .hbc not .js
-          BUNDLE_FILE=$(find dist/_expo/static/js/ios -type f | head -1)
-          echo "Found bundle: $BUNDLE_FILE"
-          cp "$BUNDLE_FILE" ios/main.jsbundle
-          # Copy assets
-          cp -r dist/assets ios/assets 2>/dev/null || true
-          echo "Bundle size: $(du -sh ios/main.jsbundle)"
-
-      - name: Pod Install
+      # ── 5. CocoaPods ──────────────────────────────────────────────────────
+      - name: Install CocoaPods dependencies
         run: |
           cd ios
-          pod install
+          pod install --repo-update
 
-      - name: Build unsigned iOS .app
+      # ── 6. xcodebuild ─────────────────────────────────────────────────────
+      # KEY DESIGN CHOICES:
+      #   • No SKIP_BUNDLING — we let Xcode's own "Bundle React Native code
+      #     and images" script phase run Metro. This is the correct, supported
+      #     path. We just provide NODE_BINARY so the script can find node.
+      #   • CODE_SIGNING_ALLOWED=NO — builds without any provisioning profile.
+      #   • DERIVED_DATA in $RUNNER_TEMP so the exact output path is known.
+      - name: Build unsigned .app with Xcode
+        env:
+          NODE_BINARY: node
         run: |
-          cd ios
+          DERIVED="$RUNNER_TEMP/DerivedData"
+
           xcodebuild \
-            -workspace brovxi.xcworkspace \
+            -workspace ios/brovxi.xcworkspace \
             -scheme brovxi \
             -configuration Release \
             -sdk iphoneos \
-            -derivedDataPath build \
+            -derivedDataPath "$DERIVED" \
+            NODE_BINARY="$(which node)" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
             PROVISIONING_PROFILE="" \
             COMPILER_INDEX_STORE_ENABLE=NO \
-            SKIP_BUNDLING=YES \
-            BUNDLE_FILE="$(pwd)/main.jsbundle" \
-            build 2>&1 | tail -100
+            build \
+            | xcpretty --color 2>/dev/null || cat /dev/stdin
 
-      - name: Find built .app
-        run: find ios/build -name "*.app" -type d
-
-      - name: Package .app into .ipa
+      # ── 7. Verify output ──────────────────────────────────────────────────
+      - name: Verify .app contents and size
         run: |
-          APP_PATH=$(find ios/build -name "*.app" -type d | head -1)
-          echo "Found app at: $APP_PATH"
-          echo "App size: $(du -sh "$APP_PATH")"
-          # Copy in the JS bundle manually if not already there
-          mkdir -p "$APP_PATH"
-          cp ios/main.jsbundle "$APP_PATH/main.jsbundle" 2>/dev/null || true
-          # Copy assets
-          cp -r ios/assets "$APP_PATH/assets" 2>/dev/null || true
-          # Package
-          mkdir -p build_output/Payload
-          cp -r "$APP_PATH" build_output/Payload/brovxi.app
-          cd build_output
-          zip -r brovxi.ipa Payload
-          echo "IPA size: $(du -sh brovxi.ipa)"
+          APP="$RUNNER_TEMP/DerivedData/Build/Products/Release-iphoneos/brovxi.app"
+          echo "=== .app size ==="
+          du -sh "$APP"
+          echo "=== .app contents ==="
+          ls -lh "$APP"
+          echo "=== JS bundle present? ==="
+          ls -lh "$APP/main.jsbundle" 2>/dev/null && echo "✅ main.jsbundle found" || echo "❌ main.jsbundle MISSING"
 
-      - name: Upload IPA Artifact
+      # ── 8. Package into .ipa ──────────────────────────────────────────────
+      - name: Package .app → .ipa
+        run: |
+          APP="$RUNNER_TEMP/DerivedData/Build/Products/Release-iphoneos/brovxi.app"
+          mkdir -p "$RUNNER_TEMP/ipa/Payload"
+          cp -r "$APP" "$RUNNER_TEMP/ipa/Payload/brovxi.app"
+          cd "$RUNNER_TEMP/ipa"
+          zip -qr brovxi.ipa Payload
+          echo "=== IPA size ==="
+          du -sh brovxi.ipa
+
+      # ── 9. Upload artifact ────────────────────────────────────────────────
+      - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
         with:
           name: brovxi-ios-ipa
-          path: build_output/brovxi.ipa
+          path: ${{ runner.temp }}/ipa/brovxi.ipa
           retention-days: 7
+          if-no-files-found: error
