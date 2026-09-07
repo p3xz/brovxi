@@ -5,10 +5,16 @@ on:
 
 jobs:
   build-ipa:
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Select Xcode 16
+        run: sudo xcode-select -s /Applications/Xcode_16.app/Contents/Developer
+
+      - name: Verify Xcode version
+        run: xcodebuild -version
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -17,7 +23,7 @@ jobs:
           cache: 'npm'
 
       - name: Install dependencies
-        run: npm install --legacy-peer-deps
+        run: npm install
 
       - name: Prebuild iOS project with Expo
         run: npx expo prebuild --platform ios --clean --no-install
@@ -41,18 +47,23 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             PROVISIONING_PROFILE="" \
             COMPILER_INDEX_STORE_ENABLE=NO \
-            clean build
+            build 2>&1 | tail -50
+
+      - name: Find built .app
+        run: find ios/build -name "*.app" -type d
 
       - name: Package .app into .ipa
         run: |
+          APP_PATH=$(find ios/build -name "*.app" -type d | head -1)
+          echo "Found app at: $APP_PATH"
           mkdir -p build_output/Payload
-          cp -r ios/build/Build/Products/Release-iphoneos/brovxi.app build_output/Payload/
+          cp -r "$APP_PATH" build_output/Payload/brovxi.app
           cd build_output
           zip -r brovxi.ipa Payload
-          cd ..
 
       - name: Upload IPA Artifact
         uses: actions/upload-artifact@v4
         with:
           name: brovxi-ios-ipa
           path: build_output/brovxi.ipa
+          retention-days: 7
