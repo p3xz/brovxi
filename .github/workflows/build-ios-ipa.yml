@@ -13,15 +13,13 @@ jobs:
       - name: List available Xcode versions
         run: ls /Applications/ | grep Xcode
 
-      - name: Select Xcode 16.2
+      - name: Select Xcode 16.2+
         run: |
-          # Try 16.2 first, fall back to 16.1
           if [ -d "/Applications/Xcode_16.2.app" ]; then
             sudo xcode-select -s /Applications/Xcode_16.2.app/Contents/Developer
           elif [ -d "/Applications/Xcode_16.1.app" ]; then
             sudo xcode-select -s /Applications/Xcode_16.1.app/Contents/Developer
           else
-            # List and pick anything >= 16.1
             XCODE=$(ls /Applications/ | grep "^Xcode_16\." | sort -V | tail -1)
             sudo xcode-select -s /Applications/$XCODE/Contents/Developer
           fi
@@ -40,6 +38,16 @@ jobs:
 
       - name: Prebuild iOS project with Expo
         run: npx expo prebuild --platform ios --clean --no-install
+
+      - name: Bundle JavaScript with Metro
+        run: |
+          mkdir -p ios/main.jsbundle.d
+          npx react-native bundle \
+            --platform ios \
+            --dev false \
+            --entry-file node_modules/expo-router/entry.js \
+            --bundle-output ios/main.jsbundle \
+            --assets-dest ios/assets
 
       - name: Pod Install
         run: |
@@ -60,6 +68,8 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             PROVISIONING_PROFILE="" \
             COMPILER_INDEX_STORE_ENABLE=NO \
+            SKIP_BUNDLING=NO \
+            FORCE_BUNDLING=YES \
             build 2>&1 | tail -80
 
       - name: Find built .app
@@ -69,10 +79,14 @@ jobs:
         run: |
           APP_PATH=$(find ios/build -name "*.app" -type d | head -1)
           echo "Found app at: $APP_PATH"
+          echo "App size:"
+          du -sh "$APP_PATH"
           mkdir -p build_output/Payload
           cp -r "$APP_PATH" build_output/Payload/brovxi.app
           cd build_output
           zip -r brovxi.ipa Payload
+          echo "IPA size:"
+          du -sh brovxi.ipa
 
       - name: Upload IPA Artifact
         uses: actions/upload-artifact@v4
