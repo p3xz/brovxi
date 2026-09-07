@@ -44,8 +44,8 @@ jobs:
           npx expo export \
             --platform ios \
             --output-dir dist
-          # Copy the bundle where Xcode expects it
-          BUNDLE_FILE=$(find dist -name "*.js" | head -1)
+          # Find the iOS bundle - Expo with Hermes outputs .hbc not .js
+          BUNDLE_FILE=$(find dist/_expo/static/js/ios -type f | head -1)
           echo "Found bundle: $BUNDLE_FILE"
           cp "$BUNDLE_FILE" ios/main.jsbundle
           # Copy assets
