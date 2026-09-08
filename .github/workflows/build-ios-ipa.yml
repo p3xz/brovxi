@@ -8,35 +8,51 @@ jobs:
     runs-on: macos-15
 
     steps:
+      # ── 1. Source ─────────────────────────────────────────────────────────
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Select Xcode 16.2 (required by RN 0.81.5)
+      # ── 2. Xcode ──────────────────────────────────────────────────────────
+      # React Native 0.81.5 requires Xcode >= 16.1.
+      # Select Xcode 16.4 which has the complete iOS 18 platform installed,
+      # avoiding the Xcode 16.2 "iOS 18.2 Platform Not Installed" bug.
+      - name: Select Xcode (compatible with RN 0.81.5)
         run: |
-          echo "Available Xcode versions:"
-          ls /Applications/ | grep Xcode
-          if [ -d "/Applications/Xcode_16.2.app" ]; then
-            sudo xcode-select -s /Applications/Xcode_16.2.app/Contents/Developer
+          echo "Available Xcode installations on runner:"
+          ls -la /Applications/ | grep -i xcode
+
+          if [ -d "/Applications/Xcode_16.4.app" ]; then
+            sudo xcode-select -s /Applications/Xcode_16.4.app/Contents/Developer
+          elif [ -d "/Applications/Xcode_16.3.app" ]; then
+            sudo xcode-select -s /Applications/Xcode_16.3.app/Contents/Developer
           elif [ -d "/Applications/Xcode_16.1.app" ]; then
             sudo xcode-select -s /Applications/Xcode_16.1.app/Contents/Developer
           else
-            XCODE=$(ls /Applications/ | grep "^Xcode_16\." | sort -V | tail -1)
-            sudo xcode-select -s "/Applications/$XCODE/Contents/Developer"
+            XCODE_APP=$(ls /Applications/ | grep -E '^Xcode_16\.[1-9]' | sort -V | tail -1)
+            sudo xcode-select -s "/Applications/$XCODE_APP/Contents/Developer"
           fi
-          xcodebuild -version
 
-      - name: Setup Node.js 20
+          echo "Selected developer directory: $(xcode-select -p)"
+          xcodebuild -version
+          sudo xcodebuild -runFirstLaunch
+
+      # ── 3. Node.js 24 ─────────────────────────────────────────────────────
+      - name: Setup Node.js 24
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           cache: 'npm'
 
-      - name: Install npm dependencies
+      # ── 4. Dependencies ───────────────────────────────────────────────────
+      - name: Install dependencies
         run: npm install
 
-      - name: Expo prebuild (iOS)
+      # ── 5. Expo Prebuild ──────────────────────────────────────────────────
+      - name: Expo prebuild (iOS native project generation)
         run: npx expo prebuild --platform ios --clean --no-install
 
+      # ── 6. Bundle JavaScript & Assets with Hermes ─────────────────────────
+      # Expo's export:embed compiles JS into Hermes bytecode (.hbc format named main.jsbundle)
       - name: Bundle JavaScript & Assets
         run: |
           mkdir -p ios/assets
@@ -47,18 +63,22 @@ jobs:
             --reset-cache \
             --bundle-output ios/main.jsbundle \
             --assets-dest ios/assets
-          echo "=== JS Bundle Size ==="
+          echo "=== Hermes JS Bundle Size ==="
           ls -lh ios/main.jsbundle
+          file ios/main.jsbundle
 
-      - name: Install CocoaPods dependencies
+      # ── 7. CocoaPods ──────────────────────────────────────────────────────
+      - name: Install CocoaPods
         run: |
           cd ios
           pod install --repo-update
 
-      - name: Build unsigned .app with Xcode
+      # ── 8. Native Release Build ───────────────────────────────────────────
+      - name: Build unsigned Release .app with Xcode
         env:
           NODE_BINARY: node
         run: |
+          set -o pipefail
           DERIVED="$RUNNER_TEMP/DerivedData"
 
           xcodebuild \
@@ -77,18 +97,20 @@ jobs:
             COMPILER_INDEX_STORE_ENABLE=NO \
             build
 
-      - name: Verify and assemble .app contents
+      # ── 9. Critical Validation: inspect .app ───────────────────────────────
+      - name: Validate .app bundle and contents
         run: |
           APP="$RUNNER_TEMP/DerivedData/Build/Products/Release-iphoneos/brovxi.app"
 
+          echo "=== 1. Checking .app directory ==="
           if [ ! -d "$APP" ]; then
             echo "❌ Error: $APP directory does not exist!"
             exit 1
           fi
 
-          # Ensure JS bundle and assets are inside .app
+          # Ensure JS bundle and assets are placed inside .app
           if [ ! -f "$APP/main.jsbundle" ]; then
-            echo "Copying generated main.jsbundle into .app..."
+            echo "Copying generated Hermes main.jsbundle into .app..."
             cp ios/main.jsbundle "$APP/main.jsbundle"
           fi
 
@@ -97,25 +119,47 @@ jobs:
             cp -r ios/assets/* "$APP/" 2>/dev/null || true
           fi
 
-          echo "=== .app contents ==="
-          ls -lh "$APP"
-          echo "=== Total .app size ==="
-          du -sh "$APP"
+          echo "=== 2. Checking total .app size ==="
+          APP_SIZE_KB=$(du -sk "$APP" | awk '{print $1}')
+          echo "App bundle size: ${APP_SIZE_KB} KB"
+          if [ "$APP_SIZE_KB" -lt 15000 ]; then
+            echo "❌ Error: App bundle size (${APP_SIZE_KB} KB) is suspiciously small (< 15 MB)!"
+            echo "This indicates a hollow or incomplete build shell."
+            exit 1
+          fi
 
-          # Verify Mach-O binary
+          echo "=== 3. Checking native Mach-O executable ==="
           if [ ! -f "$APP/brovxi" ]; then
             echo "❌ Fatal: Main binary 'brovxi' not found in $APP!"
             exit 1
           fi
+          file "$APP/brovxi"
 
-          # Verify JS bundle
+          echo "=== 4. Checking JavaScript / Hermes application bundle ==="
           if [ ! -f "$APP/main.jsbundle" ]; then
             echo "❌ Fatal: 'main.jsbundle' not found in $APP!"
             exit 1
           fi
+          BUNDLE_SIZE_KB=$(du -sk "$APP/main.jsbundle" | awk '{print $1}')
+          echo "main.jsbundle size: ${BUNDLE_SIZE_KB} KB"
+          if [ "$BUNDLE_SIZE_KB" -lt 1000 ]; then
+            echo "❌ Error: main.jsbundle is suspiciously small (< 1 MB)!"
+            exit 1
+          fi
+          file "$APP/main.jsbundle"
 
-          echo "✅ Both native binary and JS bundle verified successfully!"
+          echo "=== 5. Checking embedded Frameworks ==="
+          if [ ! -d "$APP/Frameworks" ]; then
+            echo "❌ Error: Frameworks directory missing from $APP!"
+            exit 1
+          fi
+          ls -la "$APP/Frameworks"
 
+          echo "=== 6. Full .app file listing ==="
+          ls -lh "$APP"
+          echo "✅ Critical validation passed: App contains genuine binary, Hermes bundle, and frameworks!"
+
+      # ── 10. Package into .ipa ──────────────────────────────────────────────
       - name: Package .app into .ipa
         run: |
           APP="$RUNNER_TEMP/DerivedData/Build/Products/Release-iphoneos/brovxi.app"
@@ -123,10 +167,20 @@ jobs:
           cp -r "$APP" "$RUNNER_TEMP/ipa/Payload/brovxi.app"
           cd "$RUNNER_TEMP/ipa"
           zip -qr brovxi.ipa Payload
-          echo "=== Final IPA Size ==="
+
+          echo "=== IPA Size ==="
           du -sh brovxi.ipa
           ls -lh brovxi.ipa
 
+          IPA_SIZE_KB=$(du -sk brovxi.ipa | awk '{print $1}')
+          if [ "$IPA_SIZE_KB" -lt 10000 ]; then
+            echo "❌ Error: Resulting IPA size (${IPA_SIZE_KB} KB) is under 10 MB!"
+            echo "Expected a complete application package (typically 30-80 MB)."
+            exit 1
+          fi
+          echo "✅ IPA package size verified: ${IPA_SIZE_KB} KB"
+
+      # ── 11. Upload Artifact ───────────────────────────────────────────────
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
         with:
