@@ -8,31 +8,23 @@ jobs:
     runs-on: macos-15
 
     steps:
-      # ── 1. Source ─────────────────────────────────────────────────────────
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ── 2. Xcode ──────────────────────────────────────────────────────────
-      # RN 0.81.5 requires Xcode >= 16.1. macos-15 ships 16.0 as default;
-      # 16.2 is also installed — select it explicitly.
       - name: Select Xcode 16.2 (required by RN 0.81.5)
         run: |
-          echo "Available Xcode installations:"
+          echo "Available Xcode versions:"
           ls /Applications/ | grep Xcode
-
-          if   [ -d "/Applications/Xcode_16.2.app" ]; then
+          if [ -d "/Applications/Xcode_16.2.app" ]; then
             sudo xcode-select -s /Applications/Xcode_16.2.app/Contents/Developer
           elif [ -d "/Applications/Xcode_16.1.app" ]; then
             sudo xcode-select -s /Applications/Xcode_16.1.app/Contents/Developer
           else
             XCODE=$(ls /Applications/ | grep "^Xcode_16\." | sort -V | tail -1)
-            echo "Falling back to: $XCODE"
             sudo xcode-select -s "/Applications/$XCODE/Contents/Developer"
           fi
-
           xcodebuild -version
 
-      # ── 3. Node / npm ─────────────────────────────────────────────────────
       - name: Setup Node.js 20
         uses: actions/setup-node@v4
         with:
@@ -42,25 +34,27 @@ jobs:
       - name: Install npm dependencies
         run: npm install
 
-      # ── 4. Expo prebuild ──────────────────────────────────────────────────
-      # Generates the native ios/ folder from app.json + plugins.
-      # --no-install: we already ran npm install above.
       - name: Expo prebuild (iOS)
         run: npx expo prebuild --platform ios --clean --no-install
 
-      # ── 5. CocoaPods ──────────────────────────────────────────────────────
+      - name: Bundle JavaScript & Assets
+        run: |
+          mkdir -p ios/assets
+          npx expo export:embed \
+            --entry-file node_modules/expo-router/entry.js \
+            --platform ios \
+            --dev false \
+            --reset-cache \
+            --bundle-output ios/main.jsbundle \
+            --assets-dest ios/assets
+          echo "=== JS Bundle Size ==="
+          ls -lh ios/main.jsbundle
+
       - name: Install CocoaPods dependencies
         run: |
           cd ios
           pod install --repo-update
 
-      # ── 6. xcodebuild ─────────────────────────────────────────────────────
-      # KEY DESIGN CHOICES:
-      #   • No SKIP_BUNDLING — we let Xcode's own "Bundle React Native code
-      #     and images" script phase run Metro. This is the correct, supported
-      #     path. We just provide NODE_BINARY so the script can find node.
-      #   • CODE_SIGNING_ALLOWED=NO — builds without any provisioning profile.
-      #   • DERIVED_DATA in $RUNNER_TEMP so the exact output path is known.
       - name: Build unsigned .app with Xcode
         env:
           NODE_BINARY: node
@@ -71,40 +65,68 @@ jobs:
             -workspace ios/brovxi.xcworkspace \
             -scheme brovxi \
             -configuration Release \
-            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
             -derivedDataPath "$DERIVED" \
-            NODE_BINARY="$(which node)" \
+            ENTRY_FILE="node_modules/expo-router/entry.js" \
+            ENABLE_USER_SCRIPT_SANDBOXING=NO \
+            SWIFT_STRICT_CONCURRENCY=minimal \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
             PROVISIONING_PROFILE="" \
             COMPILER_INDEX_STORE_ENABLE=NO \
-            build \
-            | xcpretty --color 2>/dev/null || cat /dev/stdin
+            build
 
-      # ── 7. Verify output ──────────────────────────────────────────────────
-      - name: Verify .app contents and size
+      - name: Verify and assemble .app contents
         run: |
           APP="$RUNNER_TEMP/DerivedData/Build/Products/Release-iphoneos/brovxi.app"
-          echo "=== .app size ==="
-          du -sh "$APP"
+
+          if [ ! -d "$APP" ]; then
+            echo "❌ Error: $APP directory does not exist!"
+            exit 1
+          fi
+
+          # Ensure JS bundle and assets are inside .app
+          if [ ! -f "$APP/main.jsbundle" ]; then
+            echo "Copying generated main.jsbundle into .app..."
+            cp ios/main.jsbundle "$APP/main.jsbundle"
+          fi
+
+          if [ -d "ios/assets" ]; then
+            echo "Copying assets into .app..."
+            cp -r ios/assets/* "$APP/" 2>/dev/null || true
+          fi
+
           echo "=== .app contents ==="
           ls -lh "$APP"
-          echo "=== JS bundle present? ==="
-          ls -lh "$APP/main.jsbundle" 2>/dev/null && echo "✅ main.jsbundle found" || echo "❌ main.jsbundle MISSING"
+          echo "=== Total .app size ==="
+          du -sh "$APP"
 
-      # ── 8. Package into .ipa ──────────────────────────────────────────────
-      - name: Package .app → .ipa
+          # Verify Mach-O binary
+          if [ ! -f "$APP/brovxi" ]; then
+            echo "❌ Fatal: Main binary 'brovxi' not found in $APP!"
+            exit 1
+          fi
+
+          # Verify JS bundle
+          if [ ! -f "$APP/main.jsbundle" ]; then
+            echo "❌ Fatal: 'main.jsbundle' not found in $APP!"
+            exit 1
+          fi
+
+          echo "✅ Both native binary and JS bundle verified successfully!"
+
+      - name: Package .app into .ipa
         run: |
           APP="$RUNNER_TEMP/DerivedData/Build/Products/Release-iphoneos/brovxi.app"
           mkdir -p "$RUNNER_TEMP/ipa/Payload"
           cp -r "$APP" "$RUNNER_TEMP/ipa/Payload/brovxi.app"
           cd "$RUNNER_TEMP/ipa"
           zip -qr brovxi.ipa Payload
-          echo "=== IPA size ==="
+          echo "=== Final IPA Size ==="
           du -sh brovxi.ipa
+          ls -lh brovxi.ipa
 
-      # ── 9. Upload artifact ────────────────────────────────────────────────
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
         with:
