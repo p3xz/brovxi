@@ -102,6 +102,15 @@ npx eas-cli build --platform android --profile preview
 
 ---
 
+## 👨‍💻 Developer
+
+**Namish Yadav**
+- GitHub: [https://github.com/p3xz](https://github.com/p3xz)
+- LinkedIn: [https://www.linkedin.com/in/namish-yadav-639769408/](https://www.linkedin.com/in/namish-yadav-639769408/)
+- Instagram: [https://instagram.com/nam7sh](https://instagram.com/nam7sh)
+
+---
+
 ## 📄 License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
